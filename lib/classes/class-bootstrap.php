@@ -6,6 +6,9 @@
  */
 namespace UsabilityDynamics\WPI_A_CIM {
 
+  use net\authorize\api\contract\v1 as AnetAPI;
+  use net\authorize\api\controller as AnetController;
+
   if( !class_exists( 'UsabilityDynamics\WPI_A_CIM\Bootstrap' ) ) {
 
     final class Bootstrap extends \UsabilityDynamics\WP\Bootstrap_Plugin {
@@ -42,6 +45,7 @@ namespace UsabilityDynamics\WPI_A_CIM {
       }
 
       /**
+       * On Authorize successful payment - create customer profile based on last transaction
        * @param $transaction
        * @param $_invoice
        */
@@ -50,9 +54,42 @@ namespace UsabilityDynamics\WPI_A_CIM {
         // We don't need to do it for recurring invoices
         if ( $_invoice['type'] == 'recurring' ) return;
 
-        if ( !$transaction ) return;
+        if ( empty( $transaction ) ) return;
 
-        die( $transaction->getTransactionID() );
+        $transactionID = $transaction->getTransactionID();
+
+        if ( empty( $transactionID ) ) return;
+
+        $settings = $_invoice[ 'billing' ][ 'wpi_authorize' ][ 'settings' ];
+
+        $merchantAuthentication = new AnetAPI\MerchantAuthenticationType();
+        $merchantAuthentication->setName( $settings['gateway_username']['value'] );
+        $merchantAuthentication->setTransactionKey( $settings['gateway_tran_key']['value'] );
+
+        $customerProfile = new AnetAPI\CustomerProfileBaseType();
+        $customerProfile->setMerchantCustomerId( $_invoice[ 'user_data' ][ 'ID' ] );
+        $customerProfile->setEmail( $_invoice[ 'user_data' ][ 'user_email' ] );
+        $customerProfile->setDescription( "Created from WP-Invoice Authorize.net CIM. Invoice ID: {$_invoice['invoice_id']}." );
+
+        $request = new AnetAPI\CreateCustomerProfileFromTransactionRequest();
+        $request->setMerchantAuthentication($merchantAuthentication);
+        $request->setTransId($transactionID);
+
+        $request->setCustomer($customerProfile);
+
+        $controller = new AnetController\CreateCustomerProfileFromTransactionController($request);
+
+        $mode = strstr($settings['gateway_url']['value'], 'test')
+            ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
+            : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+
+        $response = $controller->executeWithApiResponse( $mode );
+
+        if (($response != null) && ($response->getMessages()->getResultCode() == "Ok") ) {
+          if ( $response->getCustomerProfileId() ) {
+            update_user_meta( $_invoice[ 'user_data' ][ 'ID' ], 'wpi_authorize_cim_profile_id', $response->getCustomerProfileId() );
+          }
+        }
 
       }
 
@@ -90,6 +127,7 @@ namespace UsabilityDynamics\WPI_A_CIM {
        * @param $_invoice
        */
       public function after_fields( $_invoice ) {
+
         ob_start();
         ?>
         <script type="text/javascript">
