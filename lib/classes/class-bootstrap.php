@@ -38,10 +38,58 @@ namespace UsabilityDynamics\WPI_A_CIM {
         add_action( 'wpi_before_process_payment', array( $this, 'before_payment' ) );
         add_action( 'wpi_after_payment_fields', array( $this, 'after_fields' ) );
         add_action( 'wpi_authorize_payment_success', array( $this, 'authorize_success_payment' ), 10, 2 );
+        add_action( 'wpi_echeck_payment_success', array( $this, 'echeck_success_payment' ), 10, 2 );
 
         add_action( 'wp_ajax_wpi_cim_determine_payment_profile', array( $this, 'ajax_determine_payment_profile' ) );
         add_action( 'wp_ajax_nopriv_wpi_cim_determine_payment_profile', array( $this, 'ajax_determine_payment_profile' ) );
 
+      }
+
+      /**
+       * @param $transaction
+       * @param $_invoice
+       */
+      public function echeck_success_payment( $transaction, $_invoice ) {
+
+        // We don't need to do it for recurring invoices
+        if ( $_invoice['type'] == 'recurring' ) return;
+
+        if ( empty( $transaction ) ) return;
+
+        $transactionID = $transaction->getTransId();
+
+        if ( empty( $transactionID ) ) return;
+
+        $settings = $_invoice[ 'billing' ][ 'wpi_echeck' ][ 'settings' ];
+
+        $merchantAuthentication = new AnetAPI\MerchantAuthenticationType();
+        $merchantAuthentication->setName( $settings['gateway_username']['value'] );
+        $merchantAuthentication->setTransactionKey( $settings['gateway_tran_key']['value'] );
+
+        $customerProfile = new AnetAPI\CustomerProfileBaseType();
+        $customerProfile->setMerchantCustomerId( $_invoice[ 'user_data' ][ 'ID' ] );
+        $customerProfile->setEmail( $_invoice[ 'user_data' ][ 'user_email' ] );
+        $customerProfile->setDescription( "Created from WP-Invoice Authorize.net CIM. Invoice ID: {$_invoice['invoice_id']}." );
+
+        $request = new AnetAPI\CreateCustomerProfileFromTransactionRequest();
+        $request->setMerchantAuthentication($merchantAuthentication);
+        $request->setTransId($transactionID);
+
+        $request->setCustomer($customerProfile);
+
+        $controller = new AnetController\CreateCustomerProfileFromTransactionController($request);
+
+        $mode = $settings['gateway_test_mode']['value'] == 'TRUE'
+            ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
+            : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+
+        $response = $controller->executeWithApiResponse( $mode );
+
+        if (($response != null) && ($response->getMessages()->getResultCode() == "Ok") ) {
+          if ( $response->getCustomerProfileId() ) {
+            update_user_meta( $_invoice[ 'user_data' ][ 'ID' ], 'wpi_authorize_cim_profile_id', $response->getCustomerProfileId() );
+          }
+        }
       }
 
       /**
