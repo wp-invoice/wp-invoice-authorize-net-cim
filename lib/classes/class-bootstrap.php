@@ -40,7 +40,7 @@ namespace UsabilityDynamics\WPI_A_CIM {
        */
       public function init() {
 
-        add_action( 'wpi_before_process_payment', array( $this, 'before_payment' ) );
+        add_action( 'wpi_before_process_payment', array( $this, 'before_payment' ), 11 );
         add_action( 'wpi_after_payment_fields', array( $this, 'after_fields' ) );
         add_action( 'wpi_authorize_payment_success', array( $this, 'authorize_success_payment' ), 10, 2 );
         add_action( 'wpi_echeck_payment_success', array( $this, 'echeck_success_payment' ), 10, 2 );
@@ -219,24 +219,7 @@ namespace UsabilityDynamics\WPI_A_CIM {
 
         $controller = new AnetController\GetCustomerProfileController($request);
 
-        switch( $type ) {
-
-          case 'wpi_authorize':
-            $mode = strstr($settings['gateway_url']['value'], 'test')
-                ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
-                : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
-            break;
-
-          case 'wpi_echeck':
-            $mode = $settings['gateway_test_mode']['value'] == 'TRUE'
-                ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
-                : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
-            break;
-
-          default:
-            $mode = \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
-            break;
-        }
+        $mode = $this->get_payment_mode( $type, $settings );
 
         $response = $controller->executeWithApiResponse( $mode );
 
@@ -263,18 +246,172 @@ namespace UsabilityDynamics\WPI_A_CIM {
       }
 
       /**
+       * @param $type
+       * @param $settings
+       * @return string
+       */
+      private function get_payment_mode( $type, $settings ) {
+        switch( $type ) {
+
+          case 'wpi_authorize':
+            $mode = strstr($settings['gateway_url']['value'], 'test')
+                ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
+                : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+            break;
+
+          case 'wpi_echeck':
+            $mode = $settings['gateway_test_mode']['value'] == 'TRUE'
+                ? \net\authorize\api\constants\ANetEnvironment::SANDBOX
+                : \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+            break;
+
+          default:
+            $mode = \net\authorize\api\constants\ANetEnvironment::PRODUCTION;
+            break;
+        }
+
+        return $mode;
+      }
+
+      /**
        * @param $_invoice
        */
       public function before_payment( $_invoice ) {
+        global $invoice;
 
+        $_invoice = $invoice;
         // Do this only for specific gateways
         if ( empty( $_REQUEST['type'] ) || !in_array( $_REQUEST['type'], $this->apply_for ) ) return;
 
         if ( empty( $_POST['payment_profile'] ) || $_POST['payment_profile'] == '0' ) return;
 
+        $cc_data = $_REQUEST['cc_data'];
 
-        // Here custom payment action goes
-        die( 'ok' );
+        $settings = $_invoice[ 'billing' ][ $_REQUEST['type'] ][ 'settings' ];
+        $mode = $this->get_payment_mode( $_REQUEST['type'], $settings );
+        $profileid = get_user_meta( $_invoice[ 'user_data' ][ 'ID' ], $this->payment_profile_meta_key, 1 );
+
+        if ( empty( $profileid ) ) return;
+
+        if ($_invoice['deposit_amount'] > 0) {
+          $amount = (float) $cc_data['amount'];
+          if (((float) $cc_data['amount']) > $_invoice['net']) {
+            $amount = $_invoice['net'];
+          }
+          if (((float) $cc_data['amount']) < $_invoice['deposit_amount']) {
+            $amount = $_invoice['deposit_amount'];
+          }
+        } else {
+          $amount = $_invoice['net'];
+        }
+
+        $merchantAuthentication = new AnetAPI\MerchantAuthenticationType();
+        $merchantAuthentication->setName( $settings['gateway_username']['value'] );
+        $merchantAuthentication->setTransactionKey( $settings['gateway_tran_key']['value'] );
+
+        $refId = 'ref' . time();
+
+        $profileToCharge = new AnetAPI\CustomerProfilePaymentType();
+        $profileToCharge->setCustomerProfileId($profileid);
+        $paymentProfile = new AnetAPI\PaymentProfileType();
+        $paymentProfile->setPaymentProfileId($_POST['payment_profile']);
+        $profileToCharge->setPaymentProfile($paymentProfile);
+
+        $transactionRequestType = new AnetAPI\TransactionRequestType();
+        $transactionRequestType->setTransactionType( "authCaptureTransaction");
+        $transactionRequestType->setAmount($amount);
+        $transactionRequestType->setProfile($profileToCharge);
+
+        $request = new AnetAPI\CreateTransactionRequest();
+        $request->setMerchantAuthentication($merchantAuthentication);
+        $request->setRefId( $refId );
+        $request->setTransactionRequest( $transactionRequestType);
+        $controller = new AnetController\CreateTransactionController($request);
+        $response = $controller->executeWithApiResponse( $mode );
+
+        $res['success'] = true;
+        $res['error'] = false;
+        $res['data']['messages'] = array();
+
+        if ($response != null) {
+          if($response->getMessages()->getResultCode() == "Ok") {
+            $tresponse = $response->getTransactionResponse();
+
+            if ($tresponse != null && $tresponse->getMessages() != null) {
+              $res['data']['messages'][] = $tresponse->getMessages()[0]->getDescription();
+
+              $wp_users_id = $_invoice['user_data']['ID'];
+              $invoice_id = $_invoice['invoice_id'];
+
+              update_user_meta($wp_users_id, 'last_name', $cc_data['last_name']);
+              update_user_meta($wp_users_id, 'first_name', $cc_data['first_name']);
+              update_user_meta($wp_users_id, 'city', $cc_data['city']);
+              update_user_meta($wp_users_id, 'state', $cc_data['state']);
+              update_user_meta($wp_users_id, 'zip', $cc_data['zip']);
+              update_user_meta($wp_users_id, 'streetaddress', $cc_data['streetaddress']);
+              update_user_meta($wp_users_id, 'phonenumber', $cc_data['phonenumber']);
+              update_user_meta($wp_users_id, 'country', $cc_data['country']);
+
+              do_action( 'wpi_authorize_user_meta_updated', $cc_data );
+
+              //** Add payment amount */
+              $event_note = \WPI_Functions::currency_format($amount, $_invoice['invoice_id']) . " paid via Authorize.net CIM";
+              $event_amount = $amount;
+              $event_type = 'add_payment';
+
+              $event_note = urlencode($event_note);
+
+              $invoice_obj = new \WPI_Invoice();
+              $invoice_obj->load_invoice("id={$_invoice['invoice_id']}");
+              //** Log balance changes */
+              $invoice_obj->add_entry("attribute=balance&note=$event_note&amount=$event_amount&type=$event_type");
+              //** Log client IP */
+              $success = "Successfully processed by {$_SERVER['REMOTE_ADDR']}";
+              $invoice_obj->add_entry("attribute=invoice&note=$success&type=update");
+              //** Log payer email */
+              $payer_email = "Authorize.net Payer email: {$cc_data['user_email']}";
+              $invoice_obj->add_entry("attribute=invoice&note=$payer_email&type=update");
+
+              $invoice_obj->save_invoice();
+              //** Mark invoice as paid */
+              wp_invoice_mark_as_paid($invoice_id, $check = true);
+
+              \wpi_gateway_base::successful_payment( $invoice_obj );
+              \wpi_gateway_base::successful_payment_webhook( $invoice_obj );
+
+              send_notification( $_invoice );
+
+            } else {
+              if($tresponse->getErrors() != null) {
+                $res['data']['messages'][] = $tresponse->getErrors()[0]->getErrorText();
+                $res['success'] = false;
+                $res['error'] = true;
+              } else {
+                $res['data']['messages'][] = _e('Unknown error occurred. Please contact support.');
+                $res['success'] = false;
+                $res['error'] = true;
+              }
+            }
+          } else {
+            $tresponse = $response->getTransactionResponse();
+            if($tresponse != null && $tresponse->getErrors() != null) {
+              $res['data']['messages'][] = $tresponse->getErrors()[0]->getErrorText();
+              $res['success'] = false;
+              $res['error'] = true;
+            }
+            else {
+              $res['data']['messages'][] = $response->getMessages()->getMessage()[0]->getText();
+              $res['success'] = false;
+              $res['error'] = true;
+            }
+          }
+        } else {
+          $res['data']['messages'][] = _e( 'No response from payment gateway. Please contact support.' );
+          $res['success'] = false;
+          $res['error'] = true;
+        }
+
+        die(json_encode($res));
 
       }
 
@@ -282,6 +419,9 @@ namespace UsabilityDynamics\WPI_A_CIM {
        * @param $_invoice
        */
       public function after_fields( $_invoice ) {
+
+        // We don't need to do it for recurring invoices
+        if ( $_invoice['type'] == 'recurring' ) return;
 
         $gateway = !empty( $_POST['type'] ) ? $_POST['type'] : $_invoice['default_payment_method'];
 
