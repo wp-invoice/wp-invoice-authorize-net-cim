@@ -447,15 +447,18 @@ namespace UsabilityDynamics\WPI_A_CIM {
           }
         }
 
+        ?>
+        <div class="wpi_checkout_row">
+          <label>
+            <input id="wpi_cim_save_payment_data" type="checkbox" value="true" name="wpi_cim_save_payment_data" />
+            <?php _e( 'Securely save for future use', ud_get_wp_invoice_authorize_net_cim()->domain ); ?>
+          </label>
+        </div>
+        <?php
+
         if ( !empty( $options ) && is_array( $options ) ):
 
           ?>
-          <div class="wpi_checkout_row">
-            <label>
-              <input id="wpi_cim_save_payment_data" type="checkbox" value="true" name="wpi_cim_save_payment_data" />
-              <?php _e( 'Securely save for future use', ud_get_wp_invoice_authorize_net_cim()->domain ); ?>
-            </label>
-          </div>
 
           <ul class="wpi_checkout_block">
             <li class="wpi_checkout_row">
